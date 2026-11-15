@@ -14,10 +14,10 @@ MacBook 노치에서 펼쳐지는 Face ID 스타일 얼굴 인식 앱. 카메라
 
 ```bash
 ./build.sh
-open NotchFaceID.app
+open build/NotchFaceID.app
 ```
 
-`build.sh`는 `NotchFaceID.app`을 만들고 셀프테스트를 실행. 서명이 ad-hoc이라서 다시 빌드하면 macOS가 카메라 권한을 다시 물을 수 있음.
+`build.sh`는 `build/NotchFaceID.app`을 만들고 셀프테스트를 실행. 서명이 ad-hoc이라서 다시 빌드하면 macOS가 카메라 권한을 다시 물을 수 있음.
 
 ## 사용법
 
@@ -53,7 +53,11 @@ Vision에는 얼굴 신원 임베딩이 없어서 일반 이미지 특징값으�
 ## 셀프테스트
 
 ```bash
-NotchFaceID.app/Contents/MacOS/NotchFaceID --selftest
+build/NotchFaceID.app/Contents/MacOS/NotchFaceID --selftest
 ```
 
 특징값 추출, 영역 크롭, 저장·로드를 확인합니다. 실제 얼굴 매칭 정확도는 검사하지 않음.
+
+## 기여
+
+브랜치 전략은 GitHub Flow. 규칙과 프로젝트 구조는 [CONTRIBUTING.md](CONTRIBUTING.md) 참고.
