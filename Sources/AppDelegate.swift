@@ -7,17 +7,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var engine = Engine(ui: ui)
     var panel: NSPanel!
     var status: NSStatusItem!
+    let menu = NSMenu()
+    var hit = CGRect.zero  // notch click target, in screen coordinates; set by layout()
     let info = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main else { return NSApp.terminate(nil) }
-        var notch = CGSize(width: 180, height: 0)  // no notch: the pill drops from the screen's top edge
-        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea, screen.safeAreaInsets.top > 0 {
-            notch = CGSize(width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
-        }
-
         // Transparent click-through panel over the notch; the SwiftUI shape animates inside it.
-        let size = CGSize(width: max(notch.width + 60, 260) + 40, height: notch.height + 140)
         panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .popUpMenu  // above the menu bar
         panel.isOpaque = false
@@ -25,13 +20,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.hasShadow = false
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        panel.contentView = NSHostingView(rootView: NotchView(ui: ui, notch: notch))
-        panel.setFrame(CGRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height, width: size.width, height: size.height), display: true)
+        layout()
         panel.orderFrontRegardless()
+        // Scaling, resolution and displays coming or going all change where the notch is and how big it is in points.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+            self.layout()
+        }
 
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "faceid", accessibilityDescription: "NotchFaceID")
-        let menu = NSMenu()
         menu.delegate = self
         menu.items = [
             item("얼굴 인식", #selector(scan)), item("얼굴 등록", #selector(enroll)), item("등록 삭제", #selector(reset)),
@@ -42,16 +39,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         status.menu = menu
 
         // A full menu bar pushes the status item behind the notch, so a click on the notch opens the same menu.
-        let height = max(notch.height, 24)
-        let hit = CGRect(x: screen.frame.midX - notch.width / 2, y: screen.frame.maxY - height, width: notch.width, height: height)
         // On mouse-up and after activating: a menu opened mid-click by an inactive app is dismissed at once.
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { _ in
-            guard hit.contains(NSEvent.mouseLocation) else { return }
+            guard self.hit.contains(NSEvent.mouseLocation) else { return }
             NSApp.activate(ignoringOtherApps: true)
-            DispatchQueue.main.async { menu.popUp(positioning: nil, at: CGPoint(x: hit.minX, y: hit.minY), in: nil) }
+            DispatchQueue.main.async { self.menu.popUp(positioning: nil, at: CGPoint(x: self.hit.minX, y: self.hit.minY), in: nil) }
         }
 
         scan()
+    }
+
+    /// Fits the panel, its notch shape and the click target to the current notch. Main thread.
+    func layout() {
+        guard let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main else { return }
+        var notch = CGSize(width: 180, height: 0)  // no notch: the pill drops from the screen's top edge
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea, screen.safeAreaInsets.top > 0 {
+            notch = CGSize(width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
+        }
+        let size = CGSize(width: max(notch.width + 60, 260) + 40, height: notch.height + 140)
+        panel.contentView = NSHostingView(rootView: NotchView(ui: ui, notch: notch))
+        panel.setFrame(CGRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height, width: size.width, height: size.height), display: true)
+        let height = max(notch.height, 24)
+        hit = CGRect(x: screen.frame.midX - notch.width / 2, y: screen.frame.maxY - height, width: notch.width, height: height)
     }
 
     // Opening the app again (Spotlight, Dock, `open -a NotchFaceID`) starts a scan: a trigger without a hotkey.
