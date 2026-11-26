@@ -6,6 +6,7 @@ enum Phase { case idle, notice, scanning, enrolling, success, fail }
 final class UI: ObservableObject {
     @Published var phase = Phase.idle
     @Published var text = ""
+    @Published var badge = ""      // external auth context (e.g. "sudo · ttys003")
     @Published var progress = 0.0  // enrollment ring, 0...1
     @Published var fails = 0       // each increment plays one shake
     var last = Float.infinity      // best distance of the last scan, shown in the menu for calibration
@@ -38,13 +39,22 @@ struct NotchView: View {
                     .symbolEffect(.pulse, isActive: ui.phase == .scanning || ui.phase == .enrolling)
             }
             .frame(width: 60, height: 60)
-            Text(ui.text).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
+            Text(ui.text).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+            if !ui.badge.isEmpty {
+                Text(ui.badge)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(.white.opacity(0.14), in: Capsule())
+                    .lineLimit(1)
+            }
         }
         .padding(.top, notch.height + 6)  // content sits below the physical notch
         .opacity(open ? 1 : 0)
         // Closed, the black shape is exactly the notch, so it is invisible.
         .frame(width: open ? max(notch.width + 60, 260) : notch.width,
-               height: open ? notch.height + 112 : notch.height, alignment: .top)
+               height: open ? notch.height + (ui.badge.isEmpty ? 112 : 134) : notch.height, alignment: .top)
         .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: open ? 26 : 8, bottomTrailingRadius: open ? 26 : 8, style: .continuous))
         .modifier(Shake(animatableData: CGFloat(ui.fails)))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
