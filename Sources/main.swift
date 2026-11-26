@@ -23,11 +23,13 @@ func selfTest() -> Never {
     // Templates load back unchanged, and a file from the old matcher counts as not enrolled.
     var store = TemplateStore()
     store.url = FileManager.default.temporaryDirectory.appendingPathComponent("notchfaceid-selftest-\(getpid())")
+    store.saveURL = store.url
     try! store.save([e])
     precondition(store.load() == [e], "a saved template must load back unchanged")
     try! PropertyListEncoder().encode([[Float(1)]]).write(to: store.url)
     precondition(store.load().isEmpty, "old feature prints must force a re-enroll")
     store.delete()
+    AuthServer.runSelfTest()
     print("selftest ok (liveness of a gray frame: \(live))")
     exit(0)
 }

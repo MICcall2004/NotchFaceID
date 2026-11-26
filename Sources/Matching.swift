@@ -22,8 +22,10 @@ func scanPassed(hits: Int, spoofs: Int) -> Bool { hits >= matchFrames && spoofs 
 /// The enrolled embeddings on disk. The one place that decides where they live.
 struct TemplateStore {
     static let model = "SFace-2021dec"
-    var url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("NotchFaceID/faces")
+    /// Read from the root-protected copy once Scripts/install-sudo.sh has promoted one, else the user's own.
+    var url = TemplateStoragePolicy.activeTemplateURL
+    /// Enrollment always writes the user's copy: the app cannot write the root-owned one.
+    var saveURL = TemplateStoragePolicy.userTemplateURL
 
     private struct File: Codable { var model: String; var embeddings: [[Float]] }
 
@@ -35,11 +37,14 @@ struct TemplateStore {
     }
 
     func save(_ embeddings: [[Float]]) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try PropertyListEncoder().encode(File(model: Self.model, embeddings: embeddings)).write(to: url, options: .atomic)
+        try FileManager.default.createDirectory(at: saveURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try PropertyListEncoder().encode(File(model: Self.model, embeddings: embeddings)).write(to: saveURL, options: .atomic)
     }
 
-    func delete() { try? FileManager.default.removeItem(at: url) }
+    /// True when sudo reads a protected copy that this enrollment did not update.
+    var protectedCopyIsStale: Bool { url != saveURL }
+
+    func delete() { try? FileManager.default.removeItem(at: saveURL) }
 }
 
 final class Engine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -158,7 +163,7 @@ final class Engine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         enrolled = kept
         UserDefaults.standard.set(defaultThreshold, forKey: "threshold")  // re-enrolling undoes earlier menu tuning
-        finish(.success, "등록 완료")
+        finish(.success, store.protectedCopyIsStale ? "등록 완료 · sudo용은 install-sudo.sh로 갱신" : "등록 완료")
     }
 
     /// Ends the current scan or enrollment. Frames queue.

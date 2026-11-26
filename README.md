@@ -2,7 +2,7 @@
 
 MacBook 노치에서 펼쳐지는 Face ID 스타일 얼굴 인식 앱. 카메라로 얼굴을 찾아 등록된 얼굴과 비교하고, 결과를 노치 애니메이션으로 보여 줍.
 
-> **보안 장치가 아닙니다.** 사진을 비춰도 통과할 수 있고, 닮은 사람을 구분하지 못할 수 있습니다. macOS 로그인이나 Touch ID를 대체하지 않으며, 인식에 성공해도 애니메이션 외에는 아직 아무 동작도 하지 않습니다.
+> **Touch ID만큼 안전하지 않습니다.** 일반 RGB 카메라라 깊이를 보지 못해, 정교한 사진·영상 위조를 완전히 막지 못합니다. sudo와 잠금 화면 연동은 옵트인이며, 비밀번호 입력은 항상 대체 경로로 남습니다. Apple Pay, 키체인, 시스템 설정의 Touch ID 창은 대체할 수 없습니다. 설계와 위험은 [docs/SYSTEM_AUTH.md](docs/SYSTEM_AUTH.md) 참고.
 
 ## 요구 사항
 
@@ -34,19 +34,18 @@ open build/NotchFaceID.app
 - 본인인데 실패한다면 `더 느슨하게 (기준 +10%)`
 - 다른 사람이 통과한다면 `더 엄격하게 (기준 −10%)`
 
-기준은 등록할 때 샘플끼리의 거리에서 자동으로 계산됩니다. 계산에 쓰는 여유값(1.2배, 최소 0.3)은 추정치이므로 실제 사용하면서 조정해야 함.
+기준 기본값 0.57은 LFW 평가에서 정했습니다. 다시 등록하면 기본값으로 돌아갑니다.
 
 ## 동작 방식
 
 - 노치 위에 투명하고 클릭이 통과하는 패널을 띄우고, 그 안에서 SwiftUI 도형이 노치 크기에서 펼쳐짐.
-- 프레임마다 Vision으로 가장 큰 얼굴을 찾고(`VNDetectFaceRectanglesRequest`), 그 영역의 이미지 특징값을 뽑음(`VNGenerateImageFeaturePrintRequest`).
-- 등록된 샘플과의 유클리드 거리 중 최솟값이 기준 이하이면 통과.
-
-Vision에는 얼굴 신원 임베딩이 없어서 일반 이미지 특징값으로 대신함. 조명이 비슷할 때 뚜렷이 다른 얼굴을 구분하는 수준이며, 라이브니스 검사는 없음.
+- 프레임마다 Vision 랜드마크로 얼굴을 정렬해 SFace 임베딩(128차원)을 뽑고, MiniFASNet으로 사진·화면 여부를 봅니다. 두 모델 모두 Apache-2.0이며 Core ML로 변환해 앱에 들어 있습니다([Tools/models](Tools/models/README.md)).
+- 등록 샘플과의 거리(1 − 코사인)가 기준 이하이고 실제 얼굴로 판정된 프레임이 3장 모이면 통과합니다. 내장 카메라만 씁니다.
+- LFW 기준 정확도 99.5%, 오인식률 0.01%에서 본인 통과율 97.9%([Tools/eval](Tools/eval/README.md)). 이 Mac 카메라에서의 위조 탐지 성능은 아직 측정하지 않았습니다.
 
 ## 개인정보
 
-- 얼굴 특징값은 `~/Library/Application Support/NotchFaceID/faces`에만 저장.
+- 얼굴 임베딩은 `~/Library/Application Support/NotchFaceID/faces`에 저장. sudo 설치 시 root 보호 사본을 `/Library/Application Support/NotchFaceID/faces`에 둠.
 - 영상과 사진은 저장하지 않으며, 네트워크로 보내는 데이터는 없음.
 - 카메라는 인식·등록 중에만 켜짐.
 
@@ -56,7 +55,7 @@ Vision에는 얼굴 신원 임베딩이 없어서 일반 이미지 특징값으�
 build/NotchFaceID.app/Contents/MacOS/NotchFaceID --selftest
 ```
 
-특징값 추출, 영역 크롭, 저장·로드를 확인합니다. 실제 얼굴 매칭 정확도는 검사하지 않음.
+모델 로드와 출력 형태, 정렬 변환, 판정 규칙, 템플릿 저장·로드, AuthServer 통신을 확인합니다. 실제 얼굴 정확도는 `--eval`로 잽니다.
 
 ## 기여
 
