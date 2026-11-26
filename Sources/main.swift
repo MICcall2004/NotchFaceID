@@ -15,17 +15,26 @@ func selfTest() -> Never {
     // The models run on a frame-sized image and give the shapes the matcher relies on.
     let gray = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480))
     guard let e = FaceModels.embedding(gray, points: moved),
-          let live = FaceModels.liveness(gray, box: CGRect(x: 250, y: 150, width: 140, height: 160)) else { fatalError("a face model did not run") }
+          let lives = FaceModels.liveness(gray, box: CGRect(x: 250, y: 150, width: 140, height: 160)), lives.count == 2 else { fatalError("a face model did not run") }
+    let live = lives.reduce(0, +) / 2
     precondition(e.count == 128 && abs(distance(e, e)) < 1e-4, "SFace must give a 128-d unit vector")
-    precondition((0...1).contains(live), "liveness must be a probability")
+    precondition(lives.allSatisfy { (0...1).contains($0) }, "liveness must be a probability")
     precondition(distance(e, [0]) == .infinity, "embeddings of different sizes must never match")
-    precondition(scanPassed(hits: 3, spoofs: 1) && !scanPassed(hits: 2, spoofs: 0) && !scanPassed(hits: 4, spoofs: 2), "scan rule")
+    // A pass needs matchFrames good frames in a row; a fake-looking frame, matching or not, starts the run over.
+    let tally = { (frames: [(Bool, Bool)]) in frames.reduce(into: ScanTally()) { $0.add(match: $1.0, live: $1.1) } }
+    let good = (true, true), fake = (false, false), stranger = (false, true)
+    precondition(tally([good, good, good]).passed, "three good frames pass")
+    precondition(!tally([good, good, fake, good]).passed && !tally([good, good, stranger, good]).passed, "a bad frame breaks the run")
+    precondition(tally([fake, good, good, good]).passed, "one fake frame among three good ones still passes")
+    precondition(!tally([fake, fake, good, good, good]).passed, "fakes must stay under half the good frames")
     // Templates load back unchanged, and a file from the old matcher counts as not enrolled.
     var store = TemplateStore()
     store.url = FileManager.default.temporaryDirectory.appendingPathComponent("notchfaceid-selftest-\(getpid())")
-    store.saveURL = store.url
     try! store.save([e])
-    precondition(store.load() == [e], "a saved template must load back unchanged")
+    precondition(store.load().count == 1 && distance(store.load()[0], e) < 1e-5, "a saved template must load back unchanged")
+    // A planted long or NaN vector must not load as something that matches every face.
+    try! store.save([e.map { $0 * 100 }, e.map { _ in .nan }, [1, 2]])
+    precondition(store.load().count == 1 && abs(distance(store.load()[0], e)) < 1e-5, "templates load as unit vectors, junk dropped")
     try! PropertyListEncoder().encode([[Float(1)]]).write(to: store.url)
     precondition(store.load().isEmpty, "old feature prints must force a re-enroll")
     store.delete()

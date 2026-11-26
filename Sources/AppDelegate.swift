@@ -22,9 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var screenUnlockToggle: NSMenuItem!
     var screenUnlockPasswordItem: NSMenuItem!
     var screenUnlockDeleteItem: NSMenuItem!
+    var recordFramesToggle: NSMenuItem!
     var authServer: AuthServer?
     var screenUnlock: ScreenUnlockManager?
     private var pendingConsent: PendingConsent?
+    private var badgeToken = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Transparent click-through panel over the notch; the SwiftUI shape animates inside it.
@@ -48,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenUnlockToggle = item("잠금 화면 얼굴 해제", #selector(toggleScreenUnlock))
         screenUnlockPasswordItem = item("잠금 해제 비밀번호 설정...", #selector(setScreenUnlockPassword))
         screenUnlockDeleteItem = item("잠금 해제 비밀번호 삭제", #selector(deleteScreenUnlockPassword))
+        recordFramesToggle = item("판정 기록 (CSV)", #selector(toggleRecordFrames))
 
         menu.items = [
             item("얼굴 인식", #selector(scan)), item("얼굴 등록", #selector(enroll)), item("등록 삭제", #selector(reset)),
@@ -55,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item("더 엄격하게 (기준 −10%)", #selector(tune), tag: 90), item("더 느슨하게 (기준 +10%)", #selector(tune), tag: 110),
             .separator(), screenUnlockToggle, screenUnlockPasswordItem, screenUnlockDeleteItem,
             item("손쉬운 사용 권한 확인", #selector(checkAccessibility)),
+            .separator(), recordFramesToggle, item("기록 폴더 열기", #selector(openLogFolder)),
             .separator(), NSMenuItem(title: "종료", action: #selector(NSApplication.terminate), keyEquivalent: "q"),
         ]
         status.menu = menu
@@ -73,12 +77,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     completion(.failure)
                     return
                 }
-                self.ui.badge = "잠금 화면"
-                self.engine.authenticate(reason: reason, timeout: timeout) { result in
+                guard !self.busy, self.pendingConsent == nil else {
+                    completion(.busy)
+                    return
+                }
+                guard ScreenUnlockManager.hasProtectedTemplate else {
+                    self.engine.show(.notice, "install-sudo.sh로 보호 템플릿 먼저 설정")
+                    completion(.notEnrolled)
+                    return
+                }
+                self.setBadge("잠금 화면")
+                self.engine.authenticate(reason: reason, timeout: timeout) { [weak self] result in
                     completion(result)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) {
-                        if self.ui.phase == .idle { self.ui.badge = "" }
-                    }
+                    self?.scheduleBadgeClear()
                 }
             }
         }
@@ -133,24 +144,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        let defaults = UserDefaults.standard
         let last = ui.last.isFinite ? String(format: "%.2f", ui.last) : "–"
-        info.title = String(format: "마지막 거리 \(last) / 기준 %.2f (거리 ≤ 기준이면 통과)", UserDefaults.standard.float(forKey: "threshold"))
+        let effectiveThreshold = min(max(defaults.float(forKey: "threshold"), 0.2), thresholdCeiling)
+        let effectiveLive = max(defaults.float(forKey: "live"), liveFloor)
+        info.title = String(format: "마지막 거리 \(last) / 기준 %.2f · 라이브 ≥ %.2f (거리 ≤ 기준이면 통과)", effectiveThreshold, effectiveLive)
         let serverRunning = authServer?.isRunning == true
         let protected = TemplateStoragePolicy.isTamperProtected(TemplateStoragePolicy.systemTemplateURL)
         authStatus.title = serverRunning
-            ? (protected ? "sudo 인증 대기 중 (보호 템플릿)" : "sudo 인증 대기 중")
+            ? (protected ? "sudo 인증 대기 중 (보호 템플릿)" : "sudo 인증 대기 중 (보호 템플릿 필요)")
             : "sudo 인증 서버 비활성"
 
         let hasPw = ScreenUnlockKeychain.hasPassword
         let hasAx = ScreenUnlockManager.hasAccessibilityPermission
-        screenUnlockToggle.state = (screenUnlock?.isEnabled == true) ? .on : .off
+        screenUnlockToggle.state = (screenUnlock?.isEnabled == true && protected) ? .on : .off
         screenUnlockPasswordItem.title = hasPw ? "잠금 해제 비밀번호 변경..." : "잠금 해제 비밀번호 설정..."
         screenUnlockDeleteItem.isEnabled = hasPw
-        if !hasAx && screenUnlock?.isEnabled == true {
+        if !protected {
+            screenUnlockToggle.title = "잠금 화면 얼굴 해제 (보호 템플릿 필요)"
+        } else if !hasAx && screenUnlock?.isEnabled == true {
             screenUnlockToggle.title = "잠금 화면 얼굴 해제 (손쉬운 사용 권한 필요)"
         } else {
             screenUnlockToggle.title = "잠금 화면 얼굴 해제"
         }
+
+        recordFramesToggle.state = defaults.bool(forKey: "recordFrames") ? .on : .off
     }
 
     func item(_ title: String, _ action: Selector, tag: Int = 0) -> NSMenuItem {
@@ -162,6 +180,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var busy: Bool { ui.phase == .scanning || ui.phase == .enrolling || ui.phase == .awaitingConsent }
 
+    private func setBadge(_ text: String) {
+        badgeToken += 1
+        ui.badge = text
+    }
+
+    private func scheduleBadgeClear(after delay: TimeInterval = 2.1) {
+        let token = badgeToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.badgeToken == token, self.ui.phase == .idle else { return }
+            self.ui.badge = ""
+        }
+    }
+
     /// Requires explicit mouse click on the notch before running face recognition for sudo.
     /// Prevents passive/silent privilege escalation by user-level malware while the user sits at the Mac.
     private func requestSudoConsent(req: AuthRequest, reason: String, timeout: TimeInterval, completion: @escaping (AuthResult) -> Void) {
@@ -169,7 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             completion(.busy)
             return
         }
-        guard engine.isEnrolled else {
+        guard engine.canAuthenticate else {
             engine.show(.notice, "얼굴 미등록")
             completion(.notEnrolled)
             return
@@ -178,7 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let deadline = Date().addingTimeInterval(timeout)
         let consentWindow = max(timeout - 3.5, 2.0)
 
-        ui.badge = AuthServer.displayBadge(for: req)
+        setBadge(AuthServer.displayBadge(for: req))
         ui.text = "클릭해서 승인"
         ui.phase = .awaitingConsent
 
@@ -187,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.pendingConsent = nil
             if self.ui.phase == .awaitingConsent {
                 self.ui.phase = .idle
-                self.ui.badge = ""
+                self.setBadge("")
             }
             expired.completion(.failure)
         }
@@ -203,39 +234,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let remaining = max(consent.deadline.timeIntervalSinceNow, 3.0)
         engine.authenticate(reason: consent.reason, timeout: remaining) { [weak self] result in
             consent.completion(result)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) {
-                if self?.ui.phase == .idle { self?.ui.badge = "" }
-            }
+            self?.scheduleBadgeClear()
         }
     }
 
     @objc func scan() {
         guard !busy else { return }
-        ui.badge = ""
+        setBadge("")
         engine.isEnrolled ? engine.start(.scanning) : engine.show(.notice, "메뉴 막대 아이콘에서 얼굴 등록")
     }
 
     @objc func enroll() {
         guard !busy else { return }
-        ui.badge = ""
+        setBadge("")
         engine.start(.enrolling)
     }
 
     @objc func reset() {
         guard !busy else { return }
-        ui.badge = ""
-        engine.reset()
-        engine.show(.notice, "등록 삭제됨")
+        setBadge("")
+        engine.show(.notice, engine.reset() ? "등록 삭제됨" : "삭제됨 · sudo용 사본은 uninstall-sudo.sh --purge로 삭제")
     }
 
     @objc func tune(_ sender: NSMenuItem) {
         let defaults = UserDefaults.standard
-        defaults.set(defaults.float(forKey: "threshold") * Float(sender.tag) / 100, forKey: "threshold")
+        let current = min(max(defaults.float(forKey: "threshold"), 0.2), thresholdCeiling)
+        let next = min(max(current * Float(sender.tag) / 100, 0.2), thresholdCeiling)
+        defaults.set(next, forKey: "threshold")
+        if defaults.float(forKey: "live") < liveFloor {
+            defaults.set(liveFloor, forKey: "live")
+        }
+    }
+
+    @objc func toggleRecordFrames() {
+        let defaults = UserDefaults.standard
+        let next = !defaults.bool(forKey: "recordFrames")
+        defaults.set(next, forKey: "recordFrames")
+        engine.show(.notice, next ? "판정 기록 켜짐 (이미지 미저장)" : "판정 기록 꺼짐")
+    }
+
+    @objc func openLogFolder() {
+        let file = FrameLog.url
+        let dir = file.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: file.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([file])
+        } else {
+            NSWorkspace.shared.open(dir)
+        }
     }
 
     @objc func toggleScreenUnlock() {
         guard let screenUnlock else { return }
         if !screenUnlock.isEnabled {
+            guard ScreenUnlockManager.hasProtectedTemplate else {
+                engine.show(.notice, "install-sudo.sh로 보호 템플릿 먼저 설정")
+                return
+            }
             if !ScreenUnlockKeychain.hasPassword {
                 guard ScreenUnlockManager.promptAndSavePassword() else { return }
             }

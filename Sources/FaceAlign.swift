@@ -53,11 +53,9 @@ func render(_ image: CIImage, size: Int) -> CVPixelBuffer? {
     return buffer
 }
 
-/// The 112x112 face SFace embeds: landmarks warped onto the template.
+/// The 112x112 face SFace embeds: landmarks warped onto the template. `image` must have its extent at the origin.
 func alignedFace(_ image: CIImage, points: [CGPoint]) -> CVPixelBuffer? {
-    let origin = CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY)
-    let shifted = points.map { $0.applying(origin) }
-    return render(image.transformed(by: origin.concatenating(similarity(from: shifted, to: sfaceTemplate))), size: 112)
+    render(image.transformed(by: similarity(from: points, to: sfaceTemplate)), size: 112)
 }
 
 /// The 80x80 patch MiniFASNet classifies: the face box grown `scale` times around its centre, kept inside the frame,

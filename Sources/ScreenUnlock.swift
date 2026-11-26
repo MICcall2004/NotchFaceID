@@ -97,6 +97,10 @@ final class ScreenUnlockManager {
         AXIsProcessTrusted()
     }
 
+    static var hasProtectedTemplate: Bool {
+        TemplateStoragePolicy.isTamperProtected(TemplateStoragePolicy.systemTemplateURL)
+    }
+
     @discardableResult
     static func requestAccessibilityPermission() -> Bool {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -112,6 +116,12 @@ final class ScreenUnlockManager {
     }
 
     func start() {
+        // Initialize lock state in case the app starts while the screen is already locked.
+        if Self.isSessionLocked() {
+            isLocked = true
+            lockedAt = Date.distantPast
+        }
+
         let dnc = DistributedNotificationCenter.default()
         distributedObservers.append(
             dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
@@ -147,13 +157,16 @@ final class ScreenUnlockManager {
         observers.removeAll()
     }
 
+    /// Returns true iff WindowServer/CGSession reports the screen is currently locked.
+    private static func isSessionLocked() -> Bool {
+        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return (dict["CGSSessionScreenIsLocked"] as? Bool) == true
+    }
+
     /// Verifies with WindowServer/CGSession (cannot be spoofed via DistributedNotificationCenter)
     /// that the screen is truly locked AND loginwindow is the frontmost application.
     static func isSystemScreenActuallyLocked() -> Bool {
-        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
-              (dict["CGSSessionScreenIsLocked"] as? Bool) == true else {
-            return false
-        }
+        guard isSessionLocked() else { return false }
         let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         guard frontBundle == "com.apple.loginwindow" else {
             os_log("blocking screen unlock: frontmost=%{public}@ (expected com.apple.loginwindow)",
@@ -163,17 +176,31 @@ final class ScreenUnlockManager {
         return true
     }
 
+    private func markLockedIfConfirmed() {
+        guard Self.isSessionLocked() else { return }
+        if !isLocked {
+            isLocked = true
+            lockedAt = Date()
+            attemptsThisLock = 0
+            os_log("screen locked", log: Self.logger, type: .info)
+        }
+    }
+
     private func onScreenLocked() {
-        // Ignore spoofed distributed notifications when CGSession says the screen is not locked.
-        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
-              (dict["CGSSessionScreenIsLocked"] as? Bool) == true else {
-            os_log("ignored spoofed com.apple.screenIsLocked notification", log: Self.logger, type: .error)
+        if Self.isSessionLocked() {
+            markLockedIfConfirmed()
             return
         }
-        isLocked = true
-        lockedAt = Date()
-        attemptsThisLock = 0
-        os_log("screen locked", log: Self.logger, type: .info)
+        // WindowServer can update CGSSessionScreenIsLocked slightly after the distributed notification.
+        // Re-check once after 250ms so real locks aren't missed while spoofed notifications stay ignored.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            if Self.isSessionLocked() {
+                self.markLockedIfConfirmed()
+            } else {
+                os_log("ignored spoofed com.apple.screenIsLocked notification", log: Self.logger, type: .error)
+            }
+        }
     }
 
     private func onScreenUnlocked() {
@@ -203,6 +230,12 @@ final class ScreenUnlockManager {
             return
         }
 
+        guard Self.hasProtectedTemplate else {
+            os_log("blocking screen unlock: root-protected template required at %{public}@",
+                   log: Self.logger, type: .error, TemplateStoragePolicy.systemTemplateURL.path)
+            return
+        }
+
         isScanning = true
         attemptsThisLock += 1
         lastAttempt = Date()
@@ -212,8 +245,8 @@ final class ScreenUnlockManager {
             guard let self else { return }
             self.isScanning = false
             os_log("face unlock scan finished: %{public}@", log: Self.logger, type: .info, result.rawValue)
-            // Re-verify actual lock state + frontmost loginwindow immediately before loading/typing password.
-            guard result == .success, self.isLocked, Self.isSystemScreenActuallyLocked() else { return }
+            // Re-verify actual lock state, frontmost loginwindow, and protected template immediately before typing password.
+            guard result == .success, self.isLocked, Self.isSystemScreenActuallyLocked(), Self.hasProtectedTemplate else { return }
             guard let password = ScreenUnlockKeychain.loadPassword() else { return }
             Self.typePasswordAndSubmit(password)
         }

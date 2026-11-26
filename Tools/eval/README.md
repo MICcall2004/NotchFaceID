@@ -22,6 +22,29 @@ Takes about 3 minutes. FAR is measured on the 3,000 official impostor pairs plus
 
 The app's threshold is the FAR 0.01% point (cosine 0.431, stored as distance 1 − 0.431 = 0.57).
 
+## Tuning on this Mac (`frames.csv`)
+
+The LFW numbers above are press photos. To tune for this camera, turn on the menu's
+`판정 기록 (CSV)`, then scan a few times with your own face (`me`), a phone photo
+(`photo`), and a phone video (`video`). Each scan is one `run`. The app does not show the
+run number, but it counts up by one per scan, so label them in the order you scanned or
+read the `run` column from the CSV.
+
+```bash
+python3 Tools/eval/frames.py 1-3=me 4-6=photo 7-9=video
+python3 Tools/eval/frames.py /path/to/frames.csv 1-3=me 4-6=photo
+```
+
+The script prints per-label distance / centroid / live percentiles, the
+`distance <= t and live >= l` rule that keeps `me` at or under 5% FRR while accepting the
+fewest photo/video frames, a min-template vs centroid comparison, and frame interval plus
+eye-openness jitter. It reads numbers only; images and embeddings are never written.
+
+Caveats: the FRR is per frame, but a scan needs three good frames in a row, so the scan-level
+FRR is higher. A small number of runs gives a rough guide, not a calibrated rate. `live` is
+the average of MiniFASNetV2 and V1SE; the CSV keeps both columns (`v2Live`, `v1seLive`) so
+they can be compared separately.
+
 ## What this does not show
 
 - LFW is press photos, not this Mac's camera. Same-camera frames usually match more closely, but lighting and angle vary.

@@ -87,10 +87,11 @@ static bool is_clamshell_closed(void) {
 static bool is_screen_locked_or_off_console(void) {
     CFDictionaryRef dict = CGSessionCopyCurrentDictionary();
     if (!dict) {
-        // Under setuid root in some contexts CGSessionCopyCurrentDictionary may return NULL.
-        // Do not block purely on NULL if we can still talk to the verified user session app,
-        // unless explicitly locked.
-        return false;
+        // Fail closed: NULL means we cannot prove that an unlocked GUI console session exists
+        // (for example sudo from a launchd/background context). Falling back to the password
+        // is always safe; answering a background request with a face scan is not.
+        os_log_error(pam_logger(), "session info unavailable; refusing face auth");
+        return true;
     }
     bool blocked = false;
     CFBooleanRef locked = (CFBooleanRef)CFDictionaryGetValue(dict, CFSTR("CGSSessionScreenIsLocked"));

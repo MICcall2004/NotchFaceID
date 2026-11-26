@@ -13,6 +13,12 @@
 # Always keeps password authentication (`pam_opendirectory.so`) right after `sudo_local`.
 set -euo pipefail
 
+if [ "$(id -u)" -eq 0 ]; then
+    echo "error: run this as your normal user, not with sudo/root." >&2
+    echo "       The script calls sudo itself and installs into your \$HOME." >&2
+    exit 1
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CERT_NAME="${CERT_NAME:-NotchFaceID Local Signing}"
 TIMEOUT="${TIMEOUT:-10}"
@@ -36,6 +42,62 @@ if [ ! -d "$APP_SRC" ] || [ ! -f "$PAM_SRC" ]; then
     echo "error: build artifacts missing. Run SIGN_IDENTITY=\"$CERT_NAME\" ./build.sh first." >&2
     exit 1
 fi
+# Root reads these paths during install; never let a planted symlink redirect that read.
+if [ -L "$APP_SRC" ] || [ -L "$PAM_SRC" ]; then
+    echo "error: build artifacts must be real files/directories, not symlinks." >&2
+    exit 1
+fi
+
+# Refuse to install through a symlink planted in a path root will write.
+for path in "$APP_DST" "$SYS_SUPPORT" "$REQ_FILE" "$PAM_DST" "$AGENT_PLIST"; do
+    if [ -L "$path" ]; then
+        echo "error: $path is a symlink; refusing to install through it." >&2
+        exit 1
+    fi
+done
+
+# Validate the user's enrollment before any sudo call. Root must never open a user-controlled
+# path: a symlink to a root-only file (e.g. a password hash plist) would otherwise be copied
+# to a staff-readable location. Read as the user; hand root only the validated bytes.
+check_user_template() {
+    local path="$1"
+    [ -e "$path" ] || [ -L "$path" ] || return 0  # not enrolled yet: allowed
+    if [ -L "$path" ]; then
+        echo "error: $path is a symlink; refusing to use it." >&2
+        return 1
+    fi
+    if [ ! -f "$path" ]; then
+        echo "error: $path is not a regular file." >&2
+        return 1
+    fi
+    if [ "$(stat -f '%u' "$path")" != "$(id -u)" ]; then
+        echo "error: $path is not owned by $(id -un)." >&2
+        return 1
+    fi
+    local mode
+    mode="$(stat -f '%Mp%Lp' "$path")"
+    if [ $((8#$mode & 8#022)) -ne 0 ]; then
+        echo "error: $path is group/world-writable ($mode)." >&2
+        return 1
+    fi
+    if ! plutil -extract model raw -o - "$path" 2>/dev/null | grep -qx 'SFace-2021dec'; then
+        echo "error: $path is not a current SFace template. Enroll again in NotchFaceID first." >&2
+        return 1
+    fi
+    if ! plutil -extract embeddings json -o - "$path" 2>/dev/null | python3 -c '
+import json, math, sys
+e = json.load(sys.stdin)
+assert isinstance(e, list) and e
+assert all(isinstance(v, list) and len(v) == 128 for v in e)
+assert all(all(isinstance(x, (int, float)) and math.isfinite(x) for x in v) for v in e)
+assert all(0.5 <= math.sqrt(sum(x * x for x in v)) <= 2 for v in e)
+'; then
+        echo "error: $path contains invalid embeddings." >&2
+        return 1
+    fi
+}
+
+check_user_template "$USER_TEMPLATE" || exit 1
 
 # Reject ad-hoc signed app builds: PAM requires a pinned certificate hash.
 if codesign -dv "$APP_SRC" 2>&1 | grep -q '^Signature=adhoc$'; then
@@ -61,13 +123,19 @@ codesign --verify --strict -R "=$REQ_STR" "$APP_SRC"
 
 echo "==> Installing PAM module -> $PAM_DST"
 sudo mkdir -p /usr/local/lib/pam
-sudo install -m 0644 -o root -g wheel "$PAM_SRC" "$PAM_DST"
+# Read as the user, write as root (same reason as the template below).
+sudo sh -c 'umask 022; cat > "$1"' _ "$PAM_DST" < "$PAM_SRC"
+sudo chown root:wheel "$PAM_DST"
+sudo chmod 0644 "$PAM_DST"
 
 echo "==> Installing app -> $APP_DST (root:wheel, tamper-protected)"
+# Stage under a fresh path so root's ditto never writes through a planted symlink at the destination.
+sudo rm -rf "$APP_DST.new"
+sudo ditto "$APP_SRC" "$APP_DST.new"
+sudo chown -R root:wheel "$APP_DST.new"
+sudo chmod -R go-w "$APP_DST.new"
 sudo rm -rf "$APP_DST"
-sudo ditto "$APP_SRC" "$APP_DST"
-sudo chown -R root:wheel "$APP_DST"
-sudo chmod -R go-w "$APP_DST"
+sudo mv "$APP_DST.new" "$APP_DST"
 codesign --verify --strict -R "=$REQ_STR" "$APP_DST"
 
 echo "==> Writing root-owned pinned requirement -> $REQ_FILE"
@@ -80,7 +148,11 @@ sudo chmod 0644 "$REQ_FILE"
 
 if [ -f "$USER_TEMPLATE" ]; then
     echo "==> Promoting enrolled face template -> $SYS_SUPPORT/faces (root:staff 0640)"
-    sudo install -m 0640 -o root -g staff "$USER_TEMPLATE" "$SYS_SUPPORT/faces"
+    # Read as the user, write as root: root never opens the user-controlled source path.
+    sudo sh -c 'umask 077; cat > "$1"' _ "$SYS_SUPPORT/faces.tmp" < "$USER_TEMPLATE"
+    sudo chown root:staff "$SYS_SUPPORT/faces.tmp"
+    sudo chmod 0640 "$SYS_SUPPORT/faces.tmp"
+    sudo mv -f "$SYS_SUPPORT/faces.tmp" "$SYS_SUPPORT/faces"
 else
     echo "    Note: no enrolled template found yet at $USER_TEMPLATE."
     echo "    Enroll in NotchFaceID first, then re-run to promote to $SYS_SUPPORT/faces."

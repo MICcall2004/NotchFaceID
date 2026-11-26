@@ -4,6 +4,11 @@
 # Pass `--purge` to also remove /Applications/NotchFaceID.app and /Library/Application Support/NotchFaceID.
 set -euo pipefail
 
+if [ "$(id -u)" -eq 0 ]; then
+    echo "error: run this as your normal user, not with sudo/root." >&2
+    exit 1
+fi
+
 PURGE=0
 for arg in "$@"; do
     case "$arg" in

@@ -15,30 +15,31 @@ enum TemplateStoragePolicy {
             .appendingPathComponent("NotchFaceID/faces")
     }
 
-    /// Preferred active URL: system-protected path if present, otherwise user-local path.
-    static var activeTemplateURL: URL {
-        FileManager.default.fileExists(atPath: systemTemplateURL.path) ? systemTemplateURL : userTemplateURL
-    }
-
-    /// Returns true iff `url` and its parent directory are real (non-symlink), owned by root (uid 0),
-    /// and not writable by group or others (`mode & 0o022 == 0`).
+    /// Returns true iff `url` is a real (non-symlink) regular file owned by root (uid 0) and not
+    /// writable by group or others (`mode & 0o022 == 0`), and every ancestor directory up to `/`
+    /// is also a real root-owned non-group/world-writable directory.
     static func isTamperProtected(_ url: URL) -> Bool {
-        var dirStat = stat()
+        let standardized = url.standardizedFileURL
         var fileStat = stat()
-        let dirPath = url.deletingLastPathComponent().path
-        let filePath = url.path
-
-        guard lstat(dirPath, &dirStat) == 0,
-              (dirStat.st_mode & S_IFMT) == S_IFDIR,
-              dirStat.st_uid == 0,
-              (dirStat.st_mode & 0o022) == 0 else {
-            return false
-        }
-        guard lstat(filePath, &fileStat) == 0,
+        guard lstat(standardized.path, &fileStat) == 0,
               (fileStat.st_mode & S_IFMT) == S_IFREG,
               fileStat.st_uid == 0,
               (fileStat.st_mode & 0o022) == 0 else {
             return false
+        }
+
+        var dir = standardized.deletingLastPathComponent()
+        while true {
+            var dirStat = stat()
+            guard lstat(dir.path, &dirStat) == 0,
+                  (dirStat.st_mode & S_IFMT) == S_IFDIR,
+                  dirStat.st_uid == 0,
+                  (dirStat.st_mode & 0o022) == 0 else {
+                return false
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
         }
         return true
     }
@@ -80,8 +81,8 @@ final class AuthServer {
 
     init(
         socketURL: URL = AuthServer.defaultSocketURL,
-        allowSameUserClient: Bool = ProcessInfo.processInfo.environment["NOTCHFACEID_ALLOW_LOCAL_CLIENT"] == "1",
-        requireRootTemplates: Bool = ProcessInfo.processInfo.environment["NOTCHFACEID_REQUIRE_ROOT_TEMPLATES"] == "1",
+        allowSameUserClient: Bool = false,
+        requireRootTemplates: Bool = true,
         handler: @escaping AuthHandler
     ) {
         self.socketURL = socketURL
