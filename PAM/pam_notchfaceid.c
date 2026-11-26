@@ -3,9 +3,11 @@
 // Security design:
 // - Never accesses the camera directly (avoids TCC/responsible-process issues under setuid root).
 // - Connects over a Unix domain socket to the user's running NotchFaceID.app (AuthServer).
-// - Verifies server identity via kernel LOCAL_PEERTOKEN + SecCodeCopyGuestWithAttributes
-//   (valid code signature, identifier "local.notchfaceid", optional root-pinned requirement,
-//    and root:wheel /Applications/NotchFaceID.app ownership unless `allow_dev` is set).
+// - Verifies server identity via kernel LOCAL_PEERTOKEN + SecCodeCopyGuestWithAttributes:
+//   * Mandatory root-owned pinned SecRequirement (/Library/Application Support/NotchFaceID/code_requirement)
+//     binding both identifier and exact leaf certificate SHA-1 hash (`certificate leaf = H"..."`).
+//   * Exact bundle path match (`/Applications/NotchFaceID.app`) with root:wheel non-writable ownership.
+// - Requires explicit user consent click on the notch in NotchFaceID.app before scanning.
 // - Uses a fresh 32-byte random hex nonce per request (constant-time verified on response).
 // - Fails safe (returns PAM_IGNORE -> falls through to password) on SSH, locked screen,
 //   closed clamshell, missing app, verification failure, timeout, or SIGINT.
@@ -35,14 +37,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEFAULT_TIMEOUT_SEC 5
-#define MIN_TIMEOUT_SEC 1
-#define MAX_TIMEOUT_SEC 15
+#define DEFAULT_TIMEOUT_SEC 10
+#define MIN_TIMEOUT_SEC 3
+#define MAX_TIMEOUT_SEC 20
 #define CONNECT_TIMEOUT_MS 500
 #define MAX_MSG_BYTES 1024
 #define NONCE_BYTES 32
 #define NONCE_HEX_LEN (NONCE_BYTES * 2)
-#define APP_PREFIX "/Applications/NotchFaceID.app/"
 #define APP_BUNDLE_PATH "/Applications/NotchFaceID.app"
 #define APP_EXEC_PATH "/Applications/NotchFaceID.app/Contents/MacOS/NotchFaceID"
 #define REQUIREMENT_PATH "/Library/Application Support/NotchFaceID/code_requirement"
@@ -134,7 +135,9 @@ static CFStringRef load_pinned_requirement(void) {
 }
 
 // Verify the listening peer process via LOCAL_PEERCRED + LOCAL_PEERTOKEN + Security.framework.
-static bool verify_peer_server(int fd, uid_t target_uid, bool allow_dev, bool debug) {
+// Production-only: requires root-owned pinned code_requirement (cert hash) AND exact root-owned
+// /Applications/NotchFaceID.app bundle path. No dev bypass is permitted in PAM.
+static bool verify_peer_server(int fd, uid_t target_uid, bool debug) {
     struct xucred cred;
     socklen_t cred_len = sizeof(cred);
     if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &cred_len) != 0 || cred.cr_version != XUCRED_VERSION) {
@@ -153,8 +156,17 @@ static bool verify_peer_server(int fd, uid_t target_uid, bool allow_dev, bool de
         return false;
     }
 
+    CFStringRef req_str = load_pinned_requirement();
+    if (!req_str) {
+        os_log_error(pam_logger(), "verify_peer: missing or unprotected root code_requirement at %{public}s", REQUIREMENT_PATH);
+        return false;
+    }
+
     CFDataRef token_data = CFDataCreate(kCFAllocatorDefault, (const UInt8 *)&token, sizeof(token));
-    if (!token_data) return false;
+    if (!token_data) {
+        CFRelease(req_str);
+        return false;
+    }
 
     const void *keys[] = { kSecGuestAttributeAudit };
     const void *vals[] = { token_data };
@@ -163,20 +175,18 @@ static bool verify_peer_server(int fd, uid_t target_uid, bool allow_dev, bool de
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
     );
     CFRelease(token_data);
-    if (!attrs) return false;
+    if (!attrs) {
+        CFRelease(req_str);
+        return false;
+    }
 
     SecCodeRef guest = NULL;
     OSStatus status = SecCodeCopyGuestWithAttributes(NULL, attrs, kSecCSDefaultFlags, &guest);
     CFRelease(attrs);
     if (status != errSecSuccess || !guest) {
         os_log_error(pam_logger(), "verify_peer: SecCodeCopyGuestWithAttributes failed (%d)", (int)status);
+        CFRelease(req_str);
         return false;
-    }
-
-    CFStringRef req_str = load_pinned_requirement();
-    if (!req_str) {
-        req_str = CFSTR("identifier \"local.notchfaceid\"");
-        CFRetain(req_str);
     }
 
     SecRequirementRef req = NULL;
@@ -197,29 +207,22 @@ static bool verify_peer_server(int fd, uid_t target_uid, bool allow_dev, bool de
     }
 
     bool ok = true;
-    if (!allow_dev) {
-        // Production mode: require installed bundle in /Applications/NotchFaceID.app owned by root:wheel.
-        SecStaticCodeRef static_code = NULL;
-        CFURLRef path_url = NULL;
-        char exec_path[PATH_MAX];
-        if (SecCodeCopyStaticCode(guest, kSecCSDefaultFlags, &static_code) != errSecSuccess || !static_code ||
-            SecCodeCopyPath(static_code, kSecCSDefaultFlags, &path_url) != errSecSuccess || !path_url ||
-            !CFURLGetFileSystemRepresentation(path_url, true, (UInt8 *)exec_path, sizeof(exec_path))) {
-            os_log_error(pam_logger(), "verify_peer: failed to inspect peer executable path");
-            ok = false;
-        } else {
-            bool path_ok = (strcmp(exec_path, APP_BUNDLE_PATH) == 0) ||
-                           (strncmp(exec_path, APP_PREFIX, strlen(APP_PREFIX)) == 0);
-            if (!path_ok ||
-                !is_root_protected_path(APP_BUNDLE_PATH, true) ||
-                !is_root_protected_path(APP_EXEC_PATH, false)) {
-                os_log_error(pam_logger(), "verify_peer: peer not in root-owned /Applications/NotchFaceID.app (path=%{public}s)", exec_path);
-                ok = false;
-            }
-        }
-        if (path_url) CFRelease(path_url);
-        if (static_code) CFRelease(static_code);
+    SecStaticCodeRef static_code = NULL;
+    CFURLRef path_url = NULL;
+    char exec_path[PATH_MAX];
+    if (SecCodeCopyStaticCode(guest, kSecCSDefaultFlags, &static_code) != errSecSuccess || !static_code ||
+        SecCodeCopyPath(static_code, kSecCSDefaultFlags, &path_url) != errSecSuccess || !path_url ||
+        !CFURLGetFileSystemRepresentation(path_url, true, (UInt8 *)exec_path, sizeof(exec_path))) {
+        os_log_error(pam_logger(), "verify_peer: failed to inspect peer bundle path");
+        ok = false;
+    } else if (strcmp(exec_path, APP_BUNDLE_PATH) != 0 ||
+               !is_root_protected_path(APP_BUNDLE_PATH, true) ||
+               !is_root_protected_path(APP_EXEC_PATH, false)) {
+        os_log_error(pam_logger(), "verify_peer: peer not root-owned /Applications/NotchFaceID.app (path=%{public}s)", exec_path);
+        ok = false;
     }
+    if (path_url) CFRelease(path_url);
+    if (static_code) CFRelease(static_code);
 
     CFRelease(guest);
     return ok;
@@ -402,7 +405,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     (void)flags;
 
     int timeout_sec = DEFAULT_TIMEOUT_SEC;
-    bool allow_dev = false;
     bool debug = false;
 
     for (int i = 0; i < argc; i++) {
@@ -411,8 +413,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
             if (parsed >= MIN_TIMEOUT_SEC && parsed <= MAX_TIMEOUT_SEC) {
                 timeout_sec = parsed;
             }
-        } else if (strcmp(argv[i], "allow_dev") == 0) {
-            allow_dev = true;
         } else if (strcmp(argv[i], "debug") == 0) {
             debug = true;
         }
@@ -458,7 +458,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         return PAM_IGNORE;
     }
 
-    if (!verify_peer_server(fd, pwd.pw_uid, allow_dev, debug)) {
+    if (!verify_peer_server(fd, pwd.pw_uid, debug)) {
         close(fd);
         return PAM_IGNORE;
     }
@@ -501,7 +501,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     }
 
     char resp_buf[MAX_MSG_BYTES];
-    if (!read_line_timeout(fd, resp_buf, sizeof(resp_buf), (timeout_sec + 2) * 1000)) {
+    if (!read_line_timeout(fd, resp_buf, sizeof(resp_buf), (timeout_sec + 3) * 1000)) {
         if (debug) os_log_info(pam_logger(), "auth timed out or interrupted");
         close(fd);
         return PAM_IGNORE;

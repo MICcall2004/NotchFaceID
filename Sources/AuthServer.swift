@@ -233,7 +233,7 @@ final class AuthServer {
         }
 
         inFlight = true
-        let clampedTimeout = TimeInterval(min(max(req.timeout, 1), 15))
+        let clampedTimeout = TimeInterval(min(max(req.timeout, 3), 20))
         let reason = Self.displayReason(for: req)
 
         handler(req, reason, clampedTimeout) { [weak self] result in

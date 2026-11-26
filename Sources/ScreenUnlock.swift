@@ -147,7 +147,29 @@ final class ScreenUnlockManager {
         observers.removeAll()
     }
 
+    /// Verifies with WindowServer/CGSession (cannot be spoofed via DistributedNotificationCenter)
+    /// that the screen is truly locked AND loginwindow is the frontmost application.
+    static func isSystemScreenActuallyLocked() -> Bool {
+        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
+              (dict["CGSSessionScreenIsLocked"] as? Bool) == true else {
+            return false
+        }
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        guard frontBundle == "com.apple.loginwindow" else {
+            os_log("blocking screen unlock: frontmost=%{public}@ (expected com.apple.loginwindow)",
+                   log: Self.logger, type: .error, frontBundle ?? "(nil)")
+            return false
+        }
+        return true
+    }
+
     private func onScreenLocked() {
+        // Ignore spoofed distributed notifications when CGSession says the screen is not locked.
+        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
+              (dict["CGSSessionScreenIsLocked"] as? Bool) == true else {
+            os_log("ignored spoofed com.apple.screenIsLocked notification", log: Self.logger, type: .error)
+            return
+        }
         isLocked = true
         lockedAt = Date()
         attemptsThisLock = 0
@@ -171,6 +193,7 @@ final class ScreenUnlockManager {
         guard isEnabled,
               isLocked,
               !isScanning,
+              Self.isSystemScreenActuallyLocked(),
               Date().timeIntervalSince(lockedAt) >= Self.minLockDwellSeconds,
               attemptsThisLock < Self.maxAttemptsPerLock,
               Date().timeIntervalSince(lastAttempt) >= Self.cooldownSeconds,
@@ -189,7 +212,8 @@ final class ScreenUnlockManager {
             guard let self else { return }
             self.isScanning = false
             os_log("face unlock scan finished: %{public}@", log: Self.logger, type: .info, result.rawValue)
-            guard result == .success, self.isLocked else { return }
+            // Re-verify actual lock state + frontmost loginwindow immediately before loading/typing password.
+            guard result == .success, self.isLocked, Self.isSystemScreenActuallyLocked() else { return }
             guard let password = ScreenUnlockKeychain.loadPassword() else { return }
             Self.typePasswordAndSubmit(password)
         }
@@ -198,6 +222,10 @@ final class ScreenUnlockManager {
     /// Synthesizes keystrokes at the HID tap to submit the login password on the Lock Screen.
     /// Must be verified on macOS 26.6.2 (Secure Input policies vary across macOS versions).
     static func typePasswordAndSubmit(_ password: String) {
+        guard isSystemScreenActuallyLocked() else {
+            os_log("aborted password typing: screen not locked or loginwindow not frontmost", log: Self.logger, type: .error)
+            return
+        }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
 
         // Wake the password text field cleanly before typing.

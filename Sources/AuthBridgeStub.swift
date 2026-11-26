@@ -56,7 +56,7 @@ extension Engine {
                         finishOnce(.cameraUnavailable)
                     case .idle:
                         finishOnce(.failure)
-                    case .scanning, .enrolling:
+                    case .scanning, .enrolling, .awaitingConsent:
                         break
                     }
                 }

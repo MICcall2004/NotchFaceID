@@ -3,12 +3,20 @@ import AppKit
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private struct PendingConsent {
+        let reason: String
+        let deadline: Date
+        let timer: DispatchWorkItem
+        let completion: (AuthResult) -> Void
+    }
+
     let ui = UI()
     lazy var engine = Engine(ui: ui)
     var panel: NSPanel!
     var status: NSStatusItem!
     let menu = NSMenu()
-    var hit = CGRect.zero  // notch click target, in screen coordinates; set by layout()
+    var hit = CGRect.zero          // notch click target, in screen coordinates; set by layout()
+    var expandedHit = CGRect.zero  // expanded notch pill click target (for sudo consent)
     let info = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let authStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     var screenUnlockToggle: NSMenuItem!
@@ -16,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var screenUnlockDeleteItem: NSMenuItem!
     var authServer: AuthServer?
     var screenUnlock: ScreenUnlockManager?
+    private var pendingConsent: PendingConsent?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Transparent click-through panel over the notch; the SwiftUI shape animates inside it.
@@ -52,17 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let server = AuthServer { [weak self] req, reason, timeout, completion in
             DispatchQueue.main.async {
-                guard let self else {
-                    completion(.failure)
-                    return
-                }
-                self.ui.badge = AuthServer.displayBadge(for: req)
-                self.engine.authenticate(reason: reason, timeout: timeout) { result in
-                    completion(result)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) {
-                        if self.ui.phase == .idle { self.ui.badge = "" }
-                    }
-                }
+                self?.requestSudoConsent(req: req, reason: reason, timeout: timeout, completion: completion)
             }
         }
         _ = server.start()
@@ -87,9 +86,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenUnlock = unlock
 
         // A full menu bar pushes the status item behind the notch, so a click on the notch opens the same menu.
+        // During a pending sudo request, clicking the expanded notch approves starting the face scan (explicit consent).
         // On mouse-up and after activating: a menu opened mid-click by an inactive app is dismissed at once.
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { _ in
-            guard self.hit.contains(NSEvent.mouseLocation) else { return }
+            let loc = NSEvent.mouseLocation
+            if self.pendingConsent != nil {
+                if self.expandedHit.contains(loc) {
+                    self.approvePendingSudoConsent()
+                }
+                return
+            }
+            guard self.hit.contains(loc) else { return }
             NSApp.activate(ignoringOtherApps: true)
             DispatchQueue.main.async { self.menu.popUp(positioning: nil, at: CGPoint(x: self.hit.minX, y: self.hit.minY), in: nil) }
         }
@@ -109,6 +116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.setFrame(CGRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height, width: size.width, height: size.height), display: true)
         let height = max(notch.height, 24)
         hit = CGRect(x: screen.frame.midX - notch.width / 2, y: screen.frame.maxY - height, width: notch.width, height: height)
+        let expandedWidth = max(notch.width + 60, 260)
+        let expandedHeight = notch.height + 134
+        expandedHit = CGRect(x: screen.frame.midX - expandedWidth / 2, y: screen.frame.maxY - expandedHeight, width: expandedWidth, height: expandedHeight)
     }
 
     // Opening the app again (Spotlight, Dock, `open -a NotchFaceID`) starts a scan: a trigger without a hotkey.
@@ -150,7 +160,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    var busy: Bool { ui.phase == .scanning || ui.phase == .enrolling }
+    var busy: Bool { ui.phase == .scanning || ui.phase == .enrolling || ui.phase == .awaitingConsent }
+
+    /// Requires explicit mouse click on the notch before running face recognition for sudo.
+    /// Prevents passive/silent privilege escalation by user-level malware while the user sits at the Mac.
+    private func requestSudoConsent(req: AuthRequest, reason: String, timeout: TimeInterval, completion: @escaping (AuthResult) -> Void) {
+        guard !busy, pendingConsent == nil else {
+            completion(.busy)
+            return
+        }
+        guard engine.isEnrolled else {
+            engine.show(.notice, "얼굴 미등록")
+            completion(.notEnrolled)
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        let consentWindow = max(timeout - 3.5, 2.0)
+
+        ui.badge = AuthServer.displayBadge(for: req)
+        ui.text = "클릭해서 승인"
+        ui.phase = .awaitingConsent
+
+        let timer = DispatchWorkItem { [weak self] in
+            guard let self, let expired = self.pendingConsent else { return }
+            self.pendingConsent = nil
+            if self.ui.phase == .awaitingConsent {
+                self.ui.phase = .idle
+                self.ui.badge = ""
+            }
+            expired.completion(.failure)
+        }
+        pendingConsent = PendingConsent(reason: reason, deadline: deadline, timer: timer, completion: completion)
+        DispatchQueue.main.asyncAfter(deadline: .now() + consentWindow, execute: timer)
+    }
+
+    private func approvePendingSudoConsent() {
+        guard let consent = pendingConsent else { return }
+        pendingConsent = nil
+        consent.timer.cancel()
+
+        let remaining = max(consent.deadline.timeIntervalSinceNow, 3.0)
+        engine.authenticate(reason: consent.reason, timeout: remaining) { [weak self] result in
+            consent.completion(result)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) {
+                if self?.ui.phase == .idle { self?.ui.badge = "" }
+            }
+        }
+    }
 
     @objc func scan() {
         guard !busy else { return }

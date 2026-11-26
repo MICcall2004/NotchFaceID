@@ -1,7 +1,7 @@
 // UI state and the shape that animates out of the notch.
 import SwiftUI
 
-enum Phase { case idle, notice, scanning, enrolling, success, fail }
+enum Phase { case idle, notice, awaitingConsent, scanning, enrolling, success, fail }
 
 final class UI: ObservableObject {
     @Published var phase = Phase.idle
@@ -25,18 +25,19 @@ struct NotchView: View {
 
     var body: some View {
         let open = ui.phase != .idle
-        let tint: Color = ui.phase == .success ? .green : ui.phase == .fail ? .red : .white
+        let tint: Color = ui.phase == .success ? .green : ui.phase == .fail ? .red : ui.phase == .awaitingConsent ? .orange : .white
+        let symbol = ui.phase == .success ? "checkmark.circle.fill" : ui.phase == .awaitingConsent ? "hand.tap.fill" : "faceid"
         VStack(spacing: 8) {
             ZStack {
                 Circle().trim(from: 0, to: ui.progress)
                     .stroke(.green, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 0.2), value: ui.progress)
-                Image(systemName: ui.phase == .success ? "checkmark.circle.fill" : "faceid")
+                Image(systemName: symbol)
                     .font(.system(size: 34))
                     .foregroundStyle(tint)
                     .contentTransition(.symbolEffect(.replace))
-                    .symbolEffect(.pulse, isActive: ui.phase == .scanning || ui.phase == .enrolling)
+                    .symbolEffect(.pulse, isActive: ui.phase == .scanning || ui.phase == .enrolling || ui.phase == .awaitingConsent)
             }
             .frame(width: 60, height: 60)
             Text(ui.text).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
