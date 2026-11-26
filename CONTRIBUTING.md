@@ -34,11 +34,22 @@
 
 ```
 Sources/
-  main.swift         진입점, --selftest
-  AppDelegate.swift  노치 패널, 메뉴와 동작
-  NotchView.swift    UI 상태, 노치 애니메이션
-  Matching.swift     카메라, 얼굴 매칭
+  main.swift          진입점, --selftest, --eval
+  AppDelegate.swift   노치 패널, 메뉴, sudo 승인 클릭
+  NotchView.swift     UI 상태, 노치 애니메이션
+  Matching.swift      카메라, 등록·인식 판정, authenticate(), TemplateStore
+  FaceAlign.swift     랜드마크 정렬, 모델 입력 crop
+  FaceModels.swift    SFace 임베딩, MiniFASNet 위조 탐지
+  Eval.swift          LFW 정확도 평가
+  AuthServer.swift    PAM 모듈과 통신하는 Unix 소켓 서버
+  ScreenUnlock.swift  잠금 화면 해제(키체인 + 자동 입력, 옵트인)
+PAM/                  sudo용 PAM 모듈, 로드 확인용 pam_test
 Resources/
-  Info.plist         번들 정보, 카메라 권한 문구
-build.sh             build/NotchFaceID.app 빌드 + 셀프테스트
+  Info.plist          번들 정보, 카메라 권한 문구
+  Models/             변환된 Core ML 모델과 라이선스
+Scripts/              sudo 설치·제거, 서명 인증서, PAM PoC
+Tools/models/         모델 내려받기·변환
+Tools/eval/           평가 방법과 결과
+docs/SYSTEM_AUTH.md   sudo·잠금 화면 연동 설계
+build.sh              앱 + PAM 모듈 빌드, 셀프테스트
 ```
